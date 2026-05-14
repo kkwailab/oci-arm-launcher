@@ -12,7 +12,7 @@ concurrency:
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - name: Install OCI CLI
         run: pip install --quiet oci-cli
@@ -56,7 +56,7 @@ jobs:
           echo "Subnet: $SUBNET_ID"
           echo "Image:  $IMAGE_ID"
           echo "ADs:    $ADS"
-          END=$(( $(date +%s) + 240 ))
+          END=$(( $(date +%s) + 180 ))
           ATTEMPT=0
           while [ $(date +%s) -lt $END ]; do
             ATTEMPT=$((ATTEMPT+1))
