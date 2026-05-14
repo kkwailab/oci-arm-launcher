@@ -1,0 +1,81 @@
+name: OCI ARM A1 Launcher
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: oci-launcher
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Install OCI CLI
+        run: pip install --quiet oci-cli
+
+      - name: Configure OCI
+        run: |
+          mkdir -p ~/.oci
+          printf '%s\n' "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/key.pem
+          chmod 600 ~/.oci/key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${{ secrets.OCI_USER_OCID }}
+          fingerprint=${{ secrets.OCI_FINGERPRINT }}
+          tenancy=${{ secrets.OCI_TENANCY_OCID }}
+          region=eu-frankfurt-1
+          key_file=~/.oci/key.pem
+          EOF
+          chmod 600 ~/.oci/config
+
+      - name: Check if already running
+        id: check
+        run: |
+          set +e
+          EXISTING=$(oci compute instance list --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" --display-name "kkwai-alwaysfree1" --lifecycle-state RUNNING --query 'data[0].id' --raw-output 2>/dev/null)
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
+            echo "Already RUNNING: $EXISTING"
+            echo "already_running=true" >> $GITHUB_OUTPUT
+          else
+            echo "already_running=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Poll for capacity
+        if: steps.check.outputs.already_running == 'false'
+        run: |
+          set +e
+          COMP="${{ secrets.OCI_TENANCY_OCID }}"
+          SUBNET_ID=$(oci network subnet list --compartment-id "$COMP" --query "data[?\"display-name\"=='kkwai-public-subnet'] | [0].id" --raw-output)
+          IMAGE_ID=$(oci compute image list --compartment-id "$COMP" --shape "VM.Standard.A1.Flex" --operating-system "Canonical Ubuntu" --operating-system-version "22.04" --sort-by "TIMECREATED" --sort-order "DESC" --query "data[0].id" --raw-output)
+          ADS=$(oci iam availability-domain list --compartment-id "$COMP" --query 'data[].name' --raw-output | tr -d '[]" ,' | tr '\n' ' ')
+          SSH_KEY="${{ secrets.OCI_SSH_PUBLIC_KEY }}"
+          echo "Subnet: $SUBNET_ID"
+          echo "Image:  $IMAGE_ID"
+          echo "ADs:    $ADS"
+          END=$(( $(date +%s) + 240 ))
+          ATTEMPT=0
+          while [ $(date +%s) -lt $END ]; do
+            ATTEMPT=$((ATTEMPT+1))
+            for AD in $ADS; do
+              echo "[$(date +%H:%M:%S)] Attempt #$ATTEMPT - $AD"
+              OUTPUT=$(oci compute instance launch --availability-domain "$AD" --compartment-id "$COMP" --shape "VM.Standard.A1.Flex" --shape-config '{"ocpus":4,"memoryInGBs":24}' --image-id "$IMAGE_ID" --subnet-id "$SUBNET_ID" --boot-volume-size-in-gbs 100 --assign-public-ip true --display-name "kkwai-alwaysfree1" --metadata "{\"ssh_authorized_keys\":\"$SSH_KEY\"}" 2>&1)
+              if echo "$OUTPUT" | grep -q '"lifecycle-state"'; then
+                echo "::notice::SUCCESS in $AD"
+                echo "$OUTPUT" | grep -E '"display-name"|"lifecycle-state"|"id"|"public-ip"' | head -20
+                exit 0
+              elif echo "$OUTPUT" | grep -qi "out of.*capacity\|too many requests"; then
+                echo "  -> no capacity"
+              elif echo "$OUTPUT" | grep -qi "limitexceed\|quota"; then
+                echo "::warning::Quota issue: $(echo "$OUTPUT" | head -3)"
+                exit 0
+              else
+                echo "  -> unexpected: $(echo "$OUTPUT" | head -3)"
+              fi
+            done
+            sleep 30
+          done
+          echo "Time budget exhausted, no capacity this run."
