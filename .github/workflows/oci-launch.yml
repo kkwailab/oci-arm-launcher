@@ -1,3 +1,5 @@
+# trigger refresh
+
 name: OCI ARM A1 Launcher
 
 on:
